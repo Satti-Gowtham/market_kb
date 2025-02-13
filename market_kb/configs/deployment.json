@@ -1,0 +1,34 @@
+[
+    {
+        "name": "kb_deployment_1",
+        "module": {
+            "name": "market_kb",
+            "description": "Market Knowledge Base",
+            "parameters": "{text: str, metadata: Optional[Dict[str, Any]]}",
+            "module_type": "kb",
+            "module_version": "v0.1",
+            "module_entrypoint": "run.py",
+            "execution_type": "package"
+        },
+        "node": {"ip": "127.0.0.1"},
+        "config": {
+            "llm_config": {"config_name": "embedding_model_1"},
+            "storage_config": {
+                "storage_type": "db",
+                "path": "market_kb",
+                "options": {
+                    "query_col": "text",
+                    "answer_col": "text",
+                    "embedding_col": "embedding"
+                },
+                "storage_schema": {
+                    "id": {"type": "INTEGER", "primary_key": true},
+                    "text": {"type": "TEXT"},
+                    "metadata": {"type": "JSONB"},
+                    "source": {"type": "TEXT"},
+                    "timestamp": {"type": "TIMESTAMP"}
+                }
+            }
+        }
+    }
+]
