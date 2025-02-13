@@ -1,12 +1,9 @@
-import logging
-import json
-from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from datetime import datetime
 import pytz
 
-from naptha_sdk.schemas import KBDeployment, KBRunInput
-from naptha_sdk.storage.storage_provider import StorageProvider
+from naptha_sdk.schemas import KBRunInput
+from naptha_sdk.storage.storage_client import StorageClient
 from naptha_sdk.storage.schemas import (
     CreateStorageRequest, 
     ReadStorageRequest, 
@@ -19,7 +16,7 @@ from naptha_sdk.utils import get_logger
 
 from market_kb.schemas import InputSchema
 from market_kb.utils.chunker import SemanticChunker
-from market_kb.utils.embeddings import OllamaEmbeddings
+from market_kb.utils.embeddings import OllamaEmbedder
 
 logger = get_logger(__name__)
 
@@ -27,7 +24,7 @@ class MarketKB:
     def __init__(self, deployment: Dict[str, Any]):
         self.deployment = deployment
         self.config = self.deployment.config
-        self.storage_provider = StorageProvider(self.deployment.node)
+        self.storage_provider = StorageClient(self.deployment.node)
         self.storage_type = self.config.storage_config.storage_type
         self.table_name = self.config.storage_config.path
         self.chunks_table = f"{self.table_name}_chunks"
@@ -44,7 +41,7 @@ class MarketKB:
         
         # Initialize embeddings
         llm_config = self.config.llm_config
-        self.embeddings = OllamaEmbeddings(
+        self.embeddings = OllamaEmbedder(
             model=llm_config.model,
             url=llm_config.api_base
         )
