@@ -1,6 +1,7 @@
+import pytz
 from typing import Dict, Any
 from datetime import datetime
-import pytz
+from uuid import UUID
 
 from naptha_sdk.schemas import KBRunInput
 from naptha_sdk.storage.storage_client import StorageClient
@@ -14,7 +15,7 @@ from naptha_sdk.storage.schemas import (
 from naptha_sdk.user import sign_consumer_id
 from naptha_sdk.utils import get_logger
 
-from market_kb.schemas import InputSchema
+from market_kb.schemas import InputSchema, RetrievedMemory
 from market_kb.utils.chunker import SemanticChunker
 from market_kb.utils.embeddings import OllamaEmbedder
 
@@ -37,7 +38,7 @@ class MarketKB:
             "start": {"type": "INTEGER"},
             "ends_at": {"type": "INTEGER"}
         }
-        self.chunker = SemanticChunker(min_size=100, max_size=2000)
+        self.chunker = SemanticChunker(min_size=512, max_size=1024)
         
         # Initialize embeddings
         llm_config = self.config.llm_config
@@ -95,6 +96,7 @@ class MarketKB:
     async def ingest_knowledge(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process and store a document in the knowledge base with semantic chunking"""
         try:
+            await self.initialize()
             # First store the full document
             knowledge_data = {
                 "text": input_data["text"],
@@ -135,11 +137,7 @@ class MarketKB:
                 )
                 await self.storage_provider.execute(create_request)
 
-            return {
-                "status": "success",
-                "message": f"Added document with {len(chunks)} chunks",
-                "data": {"knowledge_id": knowledge_id}
-            }
+            return UUID(knowledge_id)
         except Exception as e:
             logger.error(f"Error ingesting knowledge: {str(e)}")
             return {"status": "error", "message": str(e)}
@@ -194,17 +192,10 @@ class MarketKB:
                             "full_text": knowledge["text"],
                             "metadata": knowledge["metadata"],
                             "source": knowledge["source"],
-                            "timestamp": knowledge["timestamp"],
-                            "similarity": chunk.get("similarity", 0.0)
+                            "timestamp": knowledge["timestamp"]
                         })
 
-            # Sort by similarity score
-            combined_results.sort(key=lambda x: x["similarity"], reverse=True)
-
-            return {
-                "status": "success", 
-                "data": combined_results[:top_k]
-            }
+            return [RetrievedMemory(**result) for result in combined_results[:top_k]]
         except Exception as e:
             logger.error(f"Error searching knowledge base: {str(e)}")
             return {"status": "error", "message": str(e)}
@@ -273,20 +264,6 @@ if __name__ == "__main__":
             "market_kb/configs/deployment.json",
             node_url=os.getenv("NODE_URL")
         )
-
-        # Initialize KB
-        init_run = {
-            "inputs": {
-                "func_name": "initialize",
-                "func_input_data": None
-            },
-            "deployment": deployment,
-            "consumer_id": naptha.user.id,
-            "signature": sign_consumer_id(naptha.user.id, os.getenv("PRIVATE_KEY"))
-        }
-        
-        result = await run(init_run)
-        print("Init Result:", result)
 
         # Test ingestion
         ingest_run = {

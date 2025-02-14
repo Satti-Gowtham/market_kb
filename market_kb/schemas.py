@@ -17,7 +17,11 @@ class InputSchema(BaseModel):
     ]
     func_input_data: Optional[Dict[str, Any]] = None
 
-class OutputSchema(BaseModel):
-    success: bool
-    message: Optional[str] = None
-    data: Optional[Dict[str, Any]] = None
+class RetrievedMemory(BaseModel):
+    chunk: str
+    chunk_start: int
+    chunk_end: int
+    full_text: str
+    metadata: Dict[str, Any]
+    source: str
+    timestamp: str
