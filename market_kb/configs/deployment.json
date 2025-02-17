@@ -1,6 +1,6 @@
 [
     {
-        "name": "kb_deployment_1",
+        "name": "market_kb",
         "module": {
             "name": "market_kb",
             "description": "Market Knowledge Base",

@@ -1,7 +1,7 @@
 import pytz
 from typing import Dict, Any
 from datetime import datetime
-from uuid import UUID
+import json
 
 from naptha_sdk.schemas import KBRunInput
 from naptha_sdk.storage.storage_client import StorageClient
@@ -22,6 +22,7 @@ from market_kb.utils.embeddings import OllamaEmbedder
 logger = get_logger(__name__)
 
 class MarketKB:
+    """ Market Knowledge Base that provides semantic storage and retrieval capabilities """
     def __init__(self, deployment: Dict[str, Any]):
         self.deployment = deployment
         self.config = self.deployment.config
@@ -38,21 +39,19 @@ class MarketKB:
             "start": {"type": "INTEGER"},
             "ends_at": {"type": "INTEGER"}
         }
-        self.chunker = SemanticChunker(min_size=512, max_size=1024)
         
-        # Initialize embeddings
+        self.chunker = SemanticChunker(min_size=512, max_size=1024)
         llm_config = self.config.llm_config
         self.embeddings = OllamaEmbedder(
             model=llm_config.model,
             url=llm_config.api_base
         )
 
-    async def initialize(self, *args, **kwargs):
+    async def initialize(self, *args, **kwargs) -> Dict[str, Any]:
         """Initialize knowledge base and chunks tables"""
         logger.info(f"Initializing tables {self.table_name} and {self.chunks_table}")
         
         try:
-            # Create main knowledge table
             if not await self.table_exists(self.table_name):
                 create_request = CreateStorageRequest(
                     storage_type=self.storage_type,
@@ -64,7 +63,6 @@ class MarketKB:
             else:
                 logger.info(f"Table {self.table_name} already exists")
 
-            # Create chunks table
             if not await self.table_exists(self.chunks_table):
                 create_request = CreateStorageRequest(
                     storage_type=self.storage_type,
@@ -82,7 +80,7 @@ class MarketKB:
             return {"status": "error", "message": str(e)}
 
     async def table_exists(self, table_name: str) -> bool:
-        """Check if a table exists"""
+        """ Check if a table exists """
         try:
             list_request = ListStorageRequest(
                 storage_type=self.storage_type,
@@ -94,10 +92,10 @@ class MarketKB:
             return False
 
     async def ingest_knowledge(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and store a document in the knowledge base with semantic chunking"""
+        """ Process and store a document in the knowledge base with semantic chunking """
         try:
             await self.initialize()
-            # First store the full document
+            
             knowledge_data = {
                 "text": input_data["text"],
                 "metadata": input_data.get("metadata", {}),
@@ -114,7 +112,6 @@ class MarketKB:
             knowledge_result = await self.storage_provider.execute(create_request)
             knowledge_id = knowledge_result.data["data"]["id"]
 
-            # Then store the chunks with embeddings
             chunks = self.chunker.chunk(input_data["text"])
             chunk_texts = [chunk["text"] for chunk in chunks]
             embeddings = await self.embeddings.embed_texts(chunk_texts)
@@ -137,21 +134,18 @@ class MarketKB:
                 )
                 await self.storage_provider.execute(create_request)
 
-            return UUID(knowledge_id)
+            return {"status": "success", "data": {"id": knowledge_id}}
         except Exception as e:
             logger.error(f"Error ingesting knowledge: {str(e)}")
             return {"status": "error", "message": str(e)}
 
     async def search(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Search the knowledge base using semantic similarity"""
+        """ Search the knowledge base using semantic similarity """
         try:
             query = input_data.get("query")
             top_k = input_data.get("top_k", 2)
-            
-            # Get embedding for query
             query_embedding = await self.embeddings.embed_text(query)
             
-            # Search in chunks table using vector similarity
             chunks_db_options = DatabaseReadOptions(
                 query_vector=query_embedding,
                 vector_col="embedding",
@@ -194,14 +188,15 @@ class MarketKB:
                             "source": knowledge["source"],
                             "timestamp": knowledge["timestamp"]
                         })
-
-            return [RetrievedMemory(**result) for result in combined_results[:top_k]]
+            
+            result = [RetrievedMemory(**result).model_dump() for result in combined_results[:top_k]]
+            return {"status": "success", "data": result}
         except Exception as e:
             logger.error(f"Error searching knowledge base: {str(e)}")
             return {"status": "error", "message": str(e)}
 
     async def get_by_id(self, knowledge_id: str) -> Dict[str, Any]:
-        """Retrieve a specific knowledge entry by ID"""
+        """ Retrieve a specific knowledge entry by ID """
         try:
             read_request = ReadStorageRequest(
                 storage_type=self.storage_type,
@@ -215,7 +210,7 @@ class MarketKB:
             return {"status": "error", "message": str(e)}
 
     async def clear(self, *args, **kwargs) -> Dict[str, Any]:
-        """Clear all data from both tables"""
+        """ Clear all data from both tables """
         try:
             # Clear main knowledge table
             delete_request = DeleteStorageRequest(
@@ -238,17 +233,26 @@ class MarketKB:
             logger.error(f"Error clearing tables: {str(e)}")
             return {"status": "error", "message": str(e)}
 
-async def run(module_run: Dict[str, Any], *args, **kwargs):
-    """Run the Market Knowledge Base deployment"""
-    module_run = KBRunInput(**module_run)
-    module_run.inputs = InputSchema(**module_run.inputs)
-    market_kb = MarketKB(module_run.deployment)
+async def run(module_run: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
+    """ Run the Market Knowledge Base deployment """
+    try:
+        module_run = KBRunInput(**module_run)
+        module_run.inputs = InputSchema(**module_run.inputs)
+        market_kb = MarketKB(module_run.deployment)
 
-    method = getattr(market_kb, module_run.inputs.func_name, None)
-    if not method:
-        raise ValueError(f"Invalid function name: {module_run.inputs.func_name}")
+        method = getattr(market_kb, module_run.inputs.func_name, None)
+        if not method:
+            raise ValueError(f"Invalid function name: {module_run.inputs.func_name}")
 
-    return await method(module_run.inputs.func_input_data)
+        result = await method(module_run.inputs.func_input_data)
+        return {"status": "success", "results": [json.dumps(result)]}
+    except Exception as e:
+        logger.error(f"Error in run: {str(e)}")
+        return {
+            "status": "error",
+            "error": True,
+            "error_message": f"Error in run: {str(e)}"
+        }
 
 if __name__ == "__main__":
     import asyncio

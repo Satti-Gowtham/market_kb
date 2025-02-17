@@ -1,6 +1,5 @@
 from pydantic import BaseModel
 from typing import Literal, Optional, Dict, Any
-# from naptha_sdk.schemas import KBConfig
 
 class InputSchema(BaseModel):
     func_name: Literal[
