@@ -23,6 +23,7 @@
                 },
                 "storage_schema": {
                     "id": {"type": "INTEGER", "primary_key": true},
+                    "knowledge_id": {"type": "TEXT"},
                     "text": {"type": "TEXT"},
                     "metadata": {"type": "JSONB"},
                     "source": {"type": "TEXT"},

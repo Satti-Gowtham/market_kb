@@ -2,7 +2,7 @@ import pytz
 from typing import Dict, Any
 from datetime import datetime
 import json
-
+import uuid
 from naptha_sdk.schemas import KBRunInput
 from naptha_sdk.storage.storage_client import StorageClient
 from naptha_sdk.storage.schemas import (
@@ -33,7 +33,7 @@ class MarketKB:
         self.knowledge_schema = self.config.storage_config.storage_schema
         self.chunks_schema = {
             "id": {"type": "INTEGER", "primary_key": True},
-            "knowledge_id": {"type": "INTEGER"},
+            "knowledge_id": {"type": "TEXT"},
             "text": {"type": "TEXT"},
             "embedding": {"type": "VECTOR", "dimension": 768},
             "start": {"type": "INTEGER"},
@@ -97,6 +97,7 @@ class MarketKB:
             await self.initialize()
             
             knowledge_data = {
+                "knowledge_id": str(uuid.uuid4()),
                 "text": input_data["text"],
                 "metadata": input_data.get("metadata", {}),
                 "source": input_data.get("metadata", {}).get("source"),
@@ -110,7 +111,11 @@ class MarketKB:
             )
 
             knowledge_result = await self.storage_provider.execute(create_request)
-            knowledge_id = knowledge_result.data["data"]["id"]
+            
+            if not knowledge_result.data:
+                return {"status": "error", "message": "Failed to create knowledge entry"}
+            
+            knowledge_id = knowledge_data["knowledge_id"]
 
             chunks = self.chunker.chunk(input_data["text"])
             chunk_texts = [chunk["text"] for chunk in chunks]
@@ -142,10 +147,11 @@ class MarketKB:
     async def search(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """ Search the knowledge base using semantic similarity """
         try:
+            await self.initialize()
             query = input_data.get("query")
             top_k = input_data.get("top_k", 2)
             query_embedding = await self.embeddings.embed_text(query)
-            
+
             chunks_db_options = DatabaseReadOptions(
                 query_vector=query_embedding,
                 vector_col="embedding",
@@ -158,9 +164,10 @@ class MarketKB:
                 path=self.chunks_table,
                 options=chunks_db_options.model_dump()
             )
+            
             chunk_results = await self.storage_provider.execute(chunks_read_request)
 
-            if not chunk_results.data:
+            if not len(chunk_results.data):
                 return {"status": "success", "data": []}
 
             # Get the corresponding knowledge entries
@@ -178,7 +185,7 @@ class MarketKB:
             combined_results = []
             for chunk in chunk_results.data:
                 for knowledge in knowledge_results.data:
-                    if chunk["knowledge_id"] == knowledge["id"]:
+                    if chunk["knowledge_id"] == knowledge["knowledge_id"]:
                         combined_results.append({
                             "chunk": chunk["text"],
                             "chunk_start": chunk["start"],

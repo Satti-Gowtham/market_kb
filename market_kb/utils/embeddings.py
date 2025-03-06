@@ -5,7 +5,7 @@ from typing import List
 logger = logging.getLogger(__name__)
 
 class OllamaEmbedder:
-    def __init__(self, model: str = "nomic-embed-text", url: str = "http://localhost:11434"):
+    def __init__(self, model: str = "nomic-embed-text", url: str = "http://ollama:11434"):
         self.model = model
         self.url = url
         self.api_url = f"{url}/api/embeddings"
