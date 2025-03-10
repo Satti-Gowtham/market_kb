@@ -6,7 +6,7 @@
             "description": "Market Knowledge Base",
             "parameters": "{text: str, metadata: Optional[Dict[str, Any]]}",
             "module_type": "kb",
-            "module_version": "v0.1",
+            "module_version": "v0.2",
             "module_entrypoint": "run.py",
             "execution_type": "package"
         },

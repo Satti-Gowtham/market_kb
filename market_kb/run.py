@@ -3,6 +3,7 @@ from typing import Dict, Any
 from datetime import datetime
 import json
 import uuid
+import math
 from naptha_sdk.schemas import KBRunInput
 from naptha_sdk.storage.storage_client import StorageClient
 from naptha_sdk.storage.schemas import (
@@ -14,73 +15,78 @@ from naptha_sdk.storage.schemas import (
 )
 from naptha_sdk.user import sign_consumer_id
 from naptha_sdk.utils import get_logger
+from dotenv import load_dotenv
 
 from market_kb.schemas import InputSchema, RetrievedMemory
 from market_kb.utils.chunker import SemanticChunker
 from market_kb.utils.embeddings import OllamaEmbedder
 
+load_dotenv()
+
 logger = get_logger(__name__)
 
 class MarketKB:
-    """ Market Knowledge Base that provides semantic storage and retrieval capabilities """
+    """Market Knowledge Base for storing and retrieving market information."""
+    
     def __init__(self, deployment: Dict[str, Any]):
-        self.deployment = deployment
-        self.config = self.deployment.config
-        self.storage_provider = StorageClient(self.deployment.node)
-        self.storage_type = self.config.storage_config.storage_type
-        self.table_name = self.config.storage_config.path
-        self.chunks_table = f"{self.table_name}_chunks"
-        self.knowledge_schema = self.config.storage_config.storage_schema
-        self.chunks_schema = {
-            "id": {"type": "INTEGER", "primary_key": True},
-            "knowledge_id": {"type": "TEXT"},
-            "text": {"type": "TEXT"},
-            "embedding": {"type": "VECTOR", "dimension": 768},
-            "start": {"type": "INTEGER"},
-            "ends_at": {"type": "INTEGER"}
-        }
-        
-        self.chunker = SemanticChunker(min_size=512, max_size=1024)
-        llm_config = self.config.llm_config
-        self.embeddings = OllamaEmbedder(
-            model=llm_config.model,
-            url=llm_config.api_base
+        self.storage_provider = StorageClient(deployment.node)
+        self.llm_config = deployment.config.llm_config
+        self.chunker = SemanticChunker(
+            min_size=512,
+            max_size=1024
         )
-
-    async def initialize(self, *args, **kwargs) -> Dict[str, Any]:
-        """Initialize knowledge base and chunks tables"""
-        logger.info(f"Initializing tables {self.table_name} and {self.chunks_table}")
+        self.embedder = OllamaEmbedder(
+            model=self.llm_config.model,
+            url=self.llm_config.url
+        )
         
+        # Set up storage options
+        storage_config = deployment.config.storage_config
+        self.storage_type = storage_config.storage_type
+        self.table_name = storage_config.path
+        self.knowledge_schema = storage_config.storage_schema
+        self.chunks_table = f"{self.table_name}_chunks"
+        
+    async def initialize(self, *args, **kwargs) -> Dict[str, Any]:
+        """Initialize the knowledge base"""
         try:
+            chunks_schema = {
+                "id": {"type": "INTEGER", "primary_key": True},
+                "knowledge_id": {"type": "TEXT"},
+                "text": {"type": "TEXT"},
+                "embedding": {"type": "VECTOR", "dimension": 768},
+                "start": {"type": "INTEGER"},
+                "ends_at": {"type": "INTEGER"}
+            }
+            
+            # Check if tables exist, create if not
             if not await self.table_exists(self.table_name):
+                logger.info(f"Creating table: {self.table_name}")
+                # Create knowledge table
                 create_request = CreateStorageRequest(
                     storage_type=self.storage_type,
                     path=self.table_name,
-                    data={"schema": self.knowledge_schema}
+                    schema=self.knowledge_schema
                 )
                 await self.storage_provider.execute(create_request)
-                logger.info(f"Created table {self.table_name}")
-            else:
-                logger.info(f"Table {self.table_name} already exists")
-
+                
             if not await self.table_exists(self.chunks_table):
+                logger.info(f"Creating chunks table: {self.chunks_table}")
+                # Create chunks table
                 create_request = CreateStorageRequest(
                     storage_type=self.storage_type,
                     path=self.chunks_table,
-                    data={"schema": self.chunks_schema}
+                    schema=chunks_schema
                 )
                 await self.storage_provider.execute(create_request)
-                logger.info(f"Created table {self.chunks_table}")
-            else:
-                logger.info(f"Table {self.chunks_table} already exists")
-
-            return {"status": "success", "message": "Tables initialized successfully"}
+                
+            return {"status": "success", "message": "Knowledge base initialized"}
         except Exception as e:
-            logger.error(f"Error initializing tables: {str(e)}")
+            logger.error(f"Error initializing knowledge base: {str(e)}")
             return {"status": "error", "message": str(e)}
-
+            
     async def table_exists(self, table_name: str) -> bool:
-        """ Check if a table exists """
+        """Check if a table exists"""
         try:
             list_request = ListStorageRequest(
                 storage_type=self.storage_type,
@@ -95,12 +101,13 @@ class MarketKB:
         """ Process and store a document in the knowledge base with semantic chunking """
         try:
             await self.initialize()
+            content = input_data.get("content", input_data.get("text", ""))
             
             knowledge_data = {
                 "knowledge_id": str(uuid.uuid4()),
-                "text": input_data["text"],
+                "text": content,
                 "metadata": input_data.get("metadata", {}),
-                "source": input_data.get("metadata", {}).get("source"),
+                "source": input_data.get("metadata", {}).get("source", "unknown"),
                 "timestamp": datetime.now(pytz.UTC).isoformat()
             }
 
@@ -114,32 +121,40 @@ class MarketKB:
             
             if not knowledge_result.data:
                 return {"status": "error", "message": "Failed to create knowledge entry"}
-            
+                
+            # Get the knowledge ID to link with chunks
             knowledge_id = knowledge_data["knowledge_id"]
-
-            chunks = self.chunker.chunk(input_data["text"])
+            
+            # Create semantic chunks
+            chunks = self.chunker.chunk(content)
             chunk_texts = [chunk["text"] for chunk in chunks]
-            embeddings = await self.embeddings.embed_texts(chunk_texts)
-
-            logger.info(f"Embedding {len(embeddings)} chunks")
-
-            for chunk, embedding in zip(chunks, embeddings):
+            embeddings = await self.embedder.embed_texts(chunk_texts)
+            
+            chunk_results = []
+            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 chunk_data = {
                     "knowledge_id": knowledge_id,
                     "text": chunk["text"],
+                    "embedding": embedding,
                     "start": chunk["start"],
-                    "ends_at": chunk["end"],
-                    "embedding": embedding
+                    "ends_at": chunk["end"]
                 }
-
-                create_request = CreateStorageRequest(
+                
+                chunk_create_request = CreateStorageRequest(
                     storage_type=self.storage_type,
                     path=self.chunks_table,
                     data={"data": chunk_data}
                 )
-                await self.storage_provider.execute(create_request)
-
-            return {"status": "success", "data": {"id": knowledge_id}}
+                
+                chunk_result = await self.storage_provider.execute(chunk_create_request)
+                chunk_results.append(chunk_result.data)
+                
+            return {
+                "status": "success",
+                "knowledge_id": knowledge_id,
+                "chunks": len(chunk_results)
+            }
+            
         except Exception as e:
             logger.error(f"Error ingesting knowledge: {str(e)}")
             return {"status": "error", "message": str(e)}
@@ -148,15 +163,28 @@ class MarketKB:
         """ Search the knowledge base using semantic similarity """
         try:
             await self.initialize()
-            query = input_data.get("query")
-            top_k = input_data.get("top_k", 2)
-            query_embedding = await self.embeddings.embed_text(query)
-
+            
+            query = input_data.get("query", "")
+            top_k = input_data.get("top_k", 3)
+            similarity_threshold = float(input_data.get("similarity_threshold", 0.3))
+            
+            if not query:
+                return {"status": "error", "message": "Query is required"}
+                
+            query_embedding = await self.embedder.embed_text(query)
+            if not query_embedding:
+                return {"status": "error", "message": "Failed to generate embedding for query"}
+            
             chunks_db_options = DatabaseReadOptions(
-                query_vector=query_embedding,
-                vector_col="embedding",
-                top_k=top_k,
-                include_similarity=True
+                filters={},
+                ordering=[],
+                vector_search={
+                    "vector": query_embedding,
+                    "column_name": "embedding",
+                    "top_k": top_k,
+                    "include_similarity": True,
+                    "include_vectors": True
+                }
             )
             
             chunks_read_request = ReadStorageRequest(
@@ -166,24 +194,63 @@ class MarketKB:
             )
             
             chunk_results = await self.storage_provider.execute(chunks_read_request)
-
-            if not len(chunk_results.data):
-                return {"status": "success", "data": []}
-
-            # Get the corresponding knowledge entries
-            knowledge_ids = [chunk["knowledge_id"] for chunk in chunk_results.data]
             
-            # Get full knowledge entries
+            if not chunk_results.data:
+                return {"status": "success", "data": []}
+                
+            # Calculate proper similarity scores and filter results
+            filtered_chunks = []
+            for chunk in chunk_results.data:
+                if "embedding" in chunk:
+                    emb = chunk["embedding"]
+                    if isinstance(emb, str):
+                        try:
+                            if emb.startswith('[') and emb.endswith(']'):
+                                emb = json.loads(emb)
+                            else:
+                                emb = [float(x) for x in emb.split(',')]
+                        except Exception:
+                            continue
+                    elif isinstance(emb, (list, tuple)):
+                        try:
+                            emb = [float(x) for x in emb]
+                        except Exception:
+                            continue
+                    elif hasattr(emb, 'tolist'):
+                        try:
+                            emb = emb.tolist()
+                        except Exception:
+                            continue
+                            
+                    if emb is not None:
+                        # Calculate similarity score
+                        similarity_score = self._calculate_cosine_similarity(
+                            query_embedding, 
+                            emb,
+                            query=query,
+                            text=chunk["text"]
+                        )
+                        
+                        # Only keep results above threshold
+                        if similarity_score >= similarity_threshold:
+                            chunk["similarity_score"] = similarity_score
+                            filtered_chunks.append(chunk)
+            
+            if not filtered_chunks:
+                return {"status": "success", "data": []}
+            
+            knowledge_ids = [chunk["knowledge_id"] for chunk in filtered_chunks]
+            
             knowledge_read_request = ReadStorageRequest(
                 storage_type=self.storage_type,
                 path=self.table_name,
-                options={"condition": {"id": {"$in": knowledge_ids}}}
+                options={"condition": {"knowledge_id": {"$in": knowledge_ids}}}
             )
             knowledge_results = await self.storage_provider.execute(knowledge_read_request)
-
-            # Combine results
+            
+            # Combine results with proper sorting by similarity
             combined_results = []
-            for chunk in chunk_results.data:
+            for chunk in filtered_chunks:
                 for knowledge in knowledge_results.data:
                     if chunk["knowledge_id"] == knowledge["knowledge_id"]:
                         combined_results.append({
@@ -193,14 +260,64 @@ class MarketKB:
                             "full_text": knowledge["text"],
                             "metadata": knowledge["metadata"],
                             "source": knowledge["source"],
-                            "timestamp": knowledge["timestamp"]
+                            "timestamp": knowledge["timestamp"],
+                            "similarity_score": chunk["similarity_score"]
                         })
             
-            result = [RetrievedMemory(**result).model_dump() for result in combined_results[:top_k]]
-            return {"status": "success", "data": result}
+            combined_results.sort(key=lambda x: x["similarity_score"], reverse=True)
+            final_results = combined_results[:top_k]
+            
+            return {"status": "success", "data": final_results}
+            
         except Exception as e:
             logger.error(f"Error searching knowledge base: {str(e)}")
             return {"status": "error", "message": str(e)}
+            
+    def _calculate_cosine_similarity(self, vec1, vec2, query=None, text=None):
+        """Calculate similarity using both cosine similarity and keyword matching"""
+        if not vec1 or not vec2 or len(vec1) != len(vec2):
+            return 0.0
+        
+        try:
+            try:
+                vec1 = [float(x) for x in vec1]
+                vec2 = [float(x) for x in vec2]
+                
+                dot_product = sum(a * b for a, b in zip(vec1, vec2))
+                mag1 = math.sqrt(sum(a * a for a in vec1))
+                mag2 = math.sqrt(sum(b * b for b in vec2))
+                
+                if mag1 < 1e-10 or mag2 < 1e-10:
+                    return 0.0
+                    
+                cosine_sim = dot_product / (mag1 * mag2)
+                cosine_sim = max(-1.0, min(1.0, cosine_sim))
+                
+            except (TypeError, ValueError):
+                return 0.0
+            
+            if cosine_sim <= 0:
+                semantic_score = 0.0
+            else:
+                shifted = (cosine_sim - 0.7) * 5
+                semantic_score = 1 / (1 + math.exp(-shifted))
+            
+            keyword_boost = 0.0
+            if query and text:
+                query_words = {w.strip('?.,!') for w in query.lower().split() if len(w.strip('?.,!')) > 3}
+                text_words = {w.strip('?.,!') for w in text.lower().split() if len(w.strip('?.,!')) > 3}
+                
+                common_words = query_words.intersection(text_words)
+                if common_words and query_words:
+                    overlap_ratio = len(common_words) / len(query_words)
+                    if overlap_ratio >= 0.5:
+                        keyword_boost = overlap_ratio * 0.3
+            
+            final_score = semantic_score * 0.8 + keyword_boost
+            return min(1.0, final_score)
+            
+        except Exception:
+            return 0.0
 
     async def get_by_id(self, knowledge_id: str) -> Dict[str, Any]:
         """ Retrieve a specific knowledge entry by ID """
@@ -223,21 +340,20 @@ class MarketKB:
             delete_request = DeleteStorageRequest(
                 storage_type=self.storage_type,
                 path=self.table_name,
-                condition={}
+                options={}
             )
             await self.storage_provider.execute(delete_request)
-
-            # Clear chunks table
-            delete_request = DeleteStorageRequest(
+            
+            chunks_delete_request = DeleteStorageRequest(
                 storage_type=self.storage_type,
                 path=self.chunks_table,
-                condition={}
+                options={}
             )
-            await self.storage_provider.execute(delete_request)
-
-            return {"status": "success", "message": "Cleared all tables"}
+            await self.storage_provider.execute(chunks_delete_request)
+            
+            return {"status": "success", "message": "Knowledge base cleared"}
         except Exception as e:
-            logger.error(f"Error clearing tables: {str(e)}")
+            logger.error(f"Error clearing knowledge base: {str(e)}")
             return {"status": "error", "message": str(e)}
 
 async def run(module_run: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
@@ -266,69 +382,20 @@ if __name__ == "__main__":
     import os
     from naptha_sdk.client.naptha import Naptha
     from naptha_sdk.configs import setup_module_deployment
+    from tests import test_search, test_ingest
 
-    naptha = Naptha()
-    
-    async def test_kb():
-        deployment = await setup_module_deployment(
-            "kb",
-            "market_kb/configs/deployment.json",
-            node_url=os.getenv("NODE_URL")
-        )
+    async def main():
+        """Example of how to use the Market KB module"""
+        if not os.getenv("NODE_URL"):
+            print("Please set NODE_URL environment variable to run this script directly")
+            return
 
-        # Test ingestion
-        ingest_run = {
-            "inputs": {
-                "func_name": "ingest_knowledge",
-                "func_input_data": {
-                    "text": '''
-Contrary to popular belief, Lorem Ipsum is not simply random text. It has roots in a piece of classical Latin literature from 45 BC, making it over 2000 years old. Richard McClintock, a Latin professor at Hampden-Sydney College in Virginia, looked up one of the more obscure Latin words, consectetur, from a Lorem Ipsum passage, and going through the cites of the word in classical literature, discovered the undoubtable source. Lorem Ipsum comes from sections 1.10.32 and 1.10.33 of "de Finibus Bonorum et Malorum" (The Extremes of Good and Evil) by Cicero, written in 45 BC. This book is a treatise on the theory of ethics, very popular during the Renaissance. The first line of Lorem Ipsum, "Lorem ipsum dolor sit amet..", comes from a line in section 1.10.32.
-
-The standard chunk of Lorem Ipsum used since the 1500s is reproduced below for those interested. Sections 1.10.32 and 1.10.33 from "de Finibus Bonorum et Malorum" by Cicero are also reproduced in their exact original form, accompanied by English versions from the 1914 translation by H. Rackham.''',
-                    "metadata": {"source": "test"}
-                }
-            },
-            "deployment": deployment,
-            "consumer_id": naptha.user.id,
-            "signature": sign_consumer_id(naptha.user.id, os.getenv("PRIVATE_KEY"))
-        }
+        # First ingest some test data
+        # print("\nIngesting test data...")
+        # await test_ingest()
         
-        result = await run(ingest_run)
-        print("Ingest Result:", result)
+        # Then try searching
+        print("\nTesting search...")
+        await test_search("Where is India?", top_k=2)
 
-        # Test search
-        search_run = {
-            "inputs": {
-                "func_name": "search",
-                "func_input_data": {"query": "What is Lorem Ipsum?", "top_k": 2}
-            },
-            "deployment": deployment,
-            "consumer_id": naptha.user.id,
-            "signature": sign_consumer_id(naptha.user.id, os.getenv("PRIVATE_KEY"))
-        }
-
-        results = await run(search_run)
-        if results["status"] == "success":
-            for result in results["data"]:
-                print("Chunk:", result["chunk"])
-                print("From document:", result["full_text"][:100] + "...")
-                print("Source:", result["source"])
-                print("-"*100)
-        else:
-            print("Search Error:", results["message"])
-
-        # Test clear
-        # clear_run = {
-        #     "inputs": {
-        #         "func_name": "clear",
-        #         "func_input_data": None
-        #     },
-        #     "deployment": deployment,
-        #     "consumer_id": naptha.user.id,
-        #     "signature": sign_consumer_id(naptha.user.id, os.getenv("PRIVATE_KEY"))
-        # }
-
-        # result = await run(clear_run)
-        # print("Clear Result:", result)
-
-    asyncio.run(test_kb())
+    asyncio.run(main())
