@@ -37,7 +37,7 @@ class MarketKB:
         )
         self.embedder = OllamaEmbedder(
             model=self.llm_config.model,
-            url=self.llm_config.url
+            url=self.llm_config.api_base
         )
         
         # Set up storage options
