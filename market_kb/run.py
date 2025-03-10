@@ -379,10 +379,10 @@ async def run(module_run: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import asyncio
-    import os
     from naptha_sdk.client.naptha import Naptha
     from naptha_sdk.configs import setup_module_deployment
     from tests import test_search, test_ingest
+    import os
 
     async def main():
         """Example of how to use the Market KB module"""
@@ -396,6 +396,6 @@ if __name__ == "__main__":
         
         # Then try searching
         print("\nTesting search...")
-        await test_search("Where is India?", top_k=2)
+        await test_search("What is Lorem Ipsum?", top_k=2)
 
     asyncio.run(main())
